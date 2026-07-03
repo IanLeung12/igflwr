@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback, useMemo } from 'react';
+import React, { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import type { InstagramUser, UserWithStatus, ActionType, FilterType } from '../utils/types';
 import { analyzeFollowBack, checkDataCompleteness } from '../utils/analyzer';
 import { loadStorage } from '../utils/storage';
@@ -26,8 +26,28 @@ export function Sidebar({ onClose }: SidebarProps) {
   const [scrapePhase, setScrapePhase] = useState('');
   const [completenessWarning, setCompletenessWarning] = useState<string | null>(null);
   const [scrapeSummary, setScrapeSummary] = useState<string | null>(null);
+  const [expectedCounts, setExpectedCounts] = useState<{ followers: number; following: number } | null>(null);
+  const [suspicionReports, setSuspicionReports] = useState<string[]>([]);
 
   const [searchQuery, setSearchQuery] = useState('');
+
+  const [debugMode, setDebugMode] = useState(false);
+  const debugLogBuffer = useRef<string[]>([]);
+  const [debugLogs, setDebugLogs] = useState<string[]>([]);
+
+  useEffect(() => {
+    if (!debugMode) return;
+    const id = setInterval(() => {
+      setDebugLogs(prev => {
+        const buf = debugLogBuffer.current;
+        if (buf.length === 0) return prev;
+        const combined = [...prev, ...buf];
+        debugLogBuffer.current = [];
+        return combined.slice(-100);
+      });
+    }, 250);
+    return () => clearInterval(id);
+  }, [debugMode]);
 
   useEffect(() => {
     loadStorage()
@@ -53,9 +73,28 @@ export function Sidebar({ onClose }: SidebarProps) {
     setActionLog([]);
     setCompletenessWarning(null);
     setScrapeSummary(null);
+    setDebugLogs([]);
+    setSuspicionReports([]);
+    debugLogBuffer.current = [];
+
+    const origDebug = console.debug;
+    console.debug = (...args: any[]) => {
+      const msg = args.map(a => {
+        if (typeof a === 'object') {
+          try { return JSON.stringify(a); } catch { return String(a); }
+        }
+        return String(a);
+      }).join(' ');
+      debugLogBuffer.current.push(msg);
+      origDebug.apply(console, args);
+    };
 
     try {
-      const { scrapeFollowers, scrapeFollowing } = await import('../utils/scraper');
+      const { scrapeFollowers, scrapeFollowing, getProfileCounts, findSuspiciousUsers } = await import('../utils/scraper');
+
+      const expected = getProfileCounts();
+      setExpectedCounts(expected);
+      log(`Expected from page: ${expected.followers} followers, ${expected.following} following`);
 
       setScrapePhase('Scraping followers...');
       log('Opening followers dialog...');
@@ -63,11 +102,23 @@ export function Sidebar({ onClose }: SidebarProps) {
       setFollowers(f);
       setScrapePhase(`Found ${f.length} followers. Scraping following...`);
       log(`Found ${f.length} followers`);
-      log('Opening following dialog...');
 
+      const fSuspicion = findSuspiciousUsers(f, expected.followers);
+      if (fSuspicion.summary) {
+        setSuspicionReports(prev => [...prev, `Followers: ${fSuspicion.summary}`]);
+        log(`Followers check: ${fSuspicion.summary}`);
+      }
+
+      log('Opening following dialog...');
       const g = await scrapeFollowing();
       setFollowing(g);
       log(`Found ${g.length} following`);
+
+      const gSuspicion = findSuspiciousUsers(g, expected.following);
+      if (gSuspicion.summary) {
+        setSuspicionReports(prev => [...prev, `Following: ${gSuspicion.summary}`]);
+        log(`Following check: ${gSuspicion.summary}`);
+      }
 
       const analyzed = analyzeFollowBack(f, g);
       setUsers(analyzed);
@@ -90,6 +141,7 @@ export function Sidebar({ onClose }: SidebarProps) {
       setError(msg);
       log(`Error: ${msg}`);
     } finally {
+      console.debug = origDebug;
       setScraping(false);
       setScrapePhase('');
     }
@@ -170,6 +222,11 @@ export function Sidebar({ onClose }: SidebarProps) {
               {scrapeSummary}
             </div>
           )}
+          {suspicionReports.length > 0 && (
+            <div style={{ padding: '6px 14px', fontSize: 10, color: '#e6a817', background: '#1a1505', borderBottom: '1px solid #262626' }}>
+              {suspicionReports.map((r, i) => <div key={i}>{r}</div>)}
+            </div>
+          )}
           {completenessWarning && <WarningBanner message={completenessWarning} />}
           <SearchBar value={searchQuery} onChange={setSearchQuery} />
           <FilterTabs
@@ -182,14 +239,16 @@ export function Sidebar({ onClose }: SidebarProps) {
         </>
       )}
 
-      {users.length > 0 && (
-        <ActionBar
-          onScrape={runScrape}
-          onCancel={handleCancel}
-          scraping={scraping}
-          log={actionLog}
-        />
-      )}
+      <ActionBar
+        onScrape={runScrape}
+        onCancel={handleCancel}
+        scraping={scraping}
+        log={actionLog}
+        debugMode={debugMode}
+        debugLogs={debugLogs}
+        onToggleDebug={() => setDebugMode(d => !d)}
+        hasData={users.length > 0}
+      />
     </Container>
   );
 }
@@ -209,6 +268,7 @@ function Container({
         right: 0,
         width: 380,
         height: '100vh',
+        overflow: 'hidden',
         background: '#121212',
         color: '#e0e0e0',
         fontFamily:
@@ -410,20 +470,61 @@ function ActionBar({
   onCancel,
   scraping,
   log,
+  debugMode,
+  debugLogs,
+  onToggleDebug,
+  hasData,
 }: {
   onScrape: () => void;
   onCancel: () => void;
   scraping: boolean;
   log: string[];
+  debugMode: boolean;
+  debugLogs: string[];
+  onToggleDebug: () => void;
+  hasData: boolean;
 }) {
   return (
     <div
       style={{
+        position: 'relative',
         borderTop: '1px solid #262626',
         padding: '8px 14px',
         flexShrink: 0,
       }}
     >
+      {debugMode && (
+        <div
+          style={{
+            position: 'absolute',
+            bottom: '100%',
+            left: 0,
+            right: 0,
+            maxHeight: '40vh',
+            overflowY: 'auto',
+            zIndex: 999,
+            fontSize: 10,
+            fontFamily: 'monospace',
+            color: '#8bc34a',
+            background: '#1a1a1a',
+            border: '1px solid #333',
+            borderBottom: 'none',
+            borderRadius: '4px 4px 0 0',
+            padding: 6,
+            lineHeight: 1.5,
+            whiteSpace: 'pre-wrap',
+            wordBreak: 'break-all',
+          }}
+        >
+          {debugLogs.length === 0 ? (
+            <div style={{ color: '#666', fontStyle: 'italic' }}>Waiting for logs... scrape to see output</div>
+          ) : (
+            debugLogs.map((msg, i) => (
+              <div key={i}>{msg}</div>
+            ))
+          )}
+        </div>
+      )}
       <div style={{ display: 'flex', gap: 6, marginBottom: 6 }}>
         <button
           onClick={onScrape}
@@ -441,7 +542,7 @@ function ActionBar({
             opacity: scraping ? 0.5 : 1,
           }}
         >
-          {scraping ? 'Scraping...' : 'Rescrape'}
+          {scraping ? 'Scraping...' : hasData ? 'Rescrape' : 'Scrape'}
         </button>
         <button
           onClick={() => window.location.reload()}
@@ -457,6 +558,22 @@ function ActionBar({
           title="Refresh page"
         >
           Refresh
+        </button>
+        <button
+          onClick={onToggleDebug}
+          style={{
+            background: debugMode ? '#1a6b3c' : '#333',
+            border: 'none',
+            color: '#e0e0e0',
+            padding: '8px 10px',
+            borderRadius: 6,
+            fontSize: 11,
+            fontWeight: 600,
+            cursor: 'pointer',
+          }}
+          title="Toggle debug log panel"
+        >
+          Debug
         </button>
       </div>
       {log.length > 0 && (
