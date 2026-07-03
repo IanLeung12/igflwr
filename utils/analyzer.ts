@@ -45,3 +45,23 @@ export function analyzeFollowBack(
   users.sort((a, b) => a.username.localeCompare(b.username));
   return users;
 }
+
+export function checkDataCompleteness(
+  followers: InstagramUser[],
+  following: InstagramUser[],
+): string | null {
+  if (followers.length < 10) {
+    return `Only ${followers.length} followers found — data may be incomplete or the scraper encountered an error.`;
+  }
+  if (following.length < 10) {
+    return `Only ${following.length} following found — data may be incomplete or the scraper encountered an error.`;
+  }
+  const diff = Math.abs(followers.length - following.length);
+  if (diff > 1000) {
+    return `Large difference between followers (${followers.length}) and following (${following.length}) — data may be truncated.`;
+  }
+  if (followers.length === following.length && followers.length > 100) {
+    return `Followers (${followers.length}) and following (${following.length}) counts are identical — unusual for large accounts. Data may be incomplete.`;
+  }
+  return null;
+}

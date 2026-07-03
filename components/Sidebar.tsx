@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useCallback, useMemo } from 'react';
 import type { InstagramUser, UserWithStatus, ActionType, FilterType } from '../utils/types';
-import { analyzeFollowBack } from '../utils/analyzer';
+import { analyzeFollowBack, checkDataCompleteness } from '../utils/analyzer';
 import { loadStorage } from '../utils/storage';
 import { enqueueAction, enqueueBatch, cancelQueue } from '../utils/actions';
 import { StatsBar } from './StatsBar';
@@ -24,6 +24,8 @@ export function Sidebar({ onClose }: SidebarProps) {
 
   const [scraping, setScraping] = useState(false);
   const [scrapePhase, setScrapePhase] = useState('');
+  const [completenessWarning, setCompletenessWarning] = useState<string | null>(null);
+  const [scrapeSummary, setScrapeSummary] = useState<string | null>(null);
 
   const [searchQuery, setSearchQuery] = useState('');
 
@@ -49,6 +51,8 @@ export function Sidebar({ onClose }: SidebarProps) {
     setScraping(true);
     setError(null);
     setActionLog([]);
+    setCompletenessWarning(null);
+    setScrapeSummary(null);
 
     try {
       const { scrapeFollowers, scrapeFollowing } = await import('../utils/scraper');
@@ -57,10 +61,10 @@ export function Sidebar({ onClose }: SidebarProps) {
       log('Opening followers dialog...');
       const f = await scrapeFollowers();
       setFollowers(f);
+      setScrapePhase(`Found ${f.length} followers. Scraping following...`);
       log(`Found ${f.length} followers`);
-
-      setScrapePhase('Scraping following...');
       log('Opening following dialog...');
+
       const g = await scrapeFollowing();
       setFollowing(g);
       log(`Found ${g.length} following`);
@@ -68,6 +72,15 @@ export function Sidebar({ onClose }: SidebarProps) {
       const analyzed = analyzeFollowBack(f, g);
       setUsers(analyzed);
       log(`Analysis complete: ${analyzed.length} total users`);
+
+      const mutuals = analyzed.filter((u) => u.status === 'mutual').length;
+      setScrapeSummary(`${f.length} followers, ${g.length} following, ${mutuals} mutuals found`);
+
+      const warning = checkDataCompleteness(f, g);
+      if (warning) {
+        setCompletenessWarning(warning);
+        log(`Data warning: ${warning}`);
+      }
 
       const { saveFollowers, saveFollowing } = await import('../utils/storage');
       await saveFollowers(f);
@@ -152,6 +165,12 @@ export function Sidebar({ onClose }: SidebarProps) {
       {users.length > 0 && (
         <>
           <StatsBar users={users} />
+          {scrapeSummary && (
+            <div style={{ padding: '8px 14px', fontSize: 11, color: '#888', borderBottom: '1px solid #262626' }}>
+              {scrapeSummary}
+            </div>
+          )}
+          {completenessWarning && <WarningBanner message={completenessWarning} />}
           <SearchBar value={searchQuery} onChange={setSearchQuery} />
           <FilterTabs
             active={activeFilter}
@@ -279,6 +298,9 @@ function EmptyState({ onScrape }: { onScrape: () => void }) {
 }
 
 function ScrapingState({ phase }: { phase: string }) {
+  const note = phase.startsWith('Scraping followers')
+    ? 'Scrolling through followers list...'
+    : 'Scrolling through following list...';
   return (
     <div
       style={{
@@ -314,8 +336,25 @@ function ScrapingState({ phase }: { phase: string }) {
       </svg>
       <div style={{ fontSize: 13 }}>{phase}</div>
       <div style={{ fontSize: 11, color: '#666', marginTop: 6 }}>
-        Scrolling through list...
+        {note}
       </div>
+    </div>
+  );
+}
+
+function WarningBanner({ message }: { message: string }) {
+  return (
+    <div
+      style={{
+        padding: '8px 14px',
+        background: '#3d3a00',
+        color: '#ffd54f',
+        fontSize: 11,
+        borderBottom: '1px solid #665a00',
+        lineHeight: 1.4,
+      }}
+    >
+      {message}
     </div>
   );
 }
