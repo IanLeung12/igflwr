@@ -17,50 +17,32 @@ export function StatsBar({ users }: StatsBarProps) {
   return (
     <div
       style={{
-        display: 'grid',
-        gridTemplateColumns: '1fr 1fr 1fr',
-        gap: '4px',
-        padding: '10px 14px',
+        display: 'flex',
+        gap: 0,
+        padding: '8px 14px',
         borderBottom: '1px solid #262626',
+        fontSize: 11,
       }}
     >
-      <StatBox label="Mutual" count={mutual} color="#00c853" />
-      <StatBox
-        label="Not following back"
-        count={notFollowingBack}
-        color="#ff1744"
-      />
-      <StatBox
-        label="You don't follow back"
-        count={youDontFollowBack}
-        color="#ff9100"
-      />
+      <Pill label="Mutual" count={mutual} color="#00c853" />
+      <Pill label="Not fol. back" count={notFollowingBack} color="#ff1744" />
+      <Pill label="Don't fol. back" count={youDontFollowBack} color="#ff9100" />
     </div>
   );
 }
 
-function StatBox({
-  label,
-  count,
-  color,
-}: {
-  label: string;
-  count: number;
-  color: string;
-}) {
+function Pill({ label, count, color }: { label: string; count: number; color: string }) {
   return (
-    <div style={{ textAlign: 'center' }}>
-      <div style={{ fontSize: 18, fontWeight: 700, color }}>{count}</div>
-      <div
-        style={{
-          fontSize: 10,
-          color: '#888',
-          lineHeight: '1.2',
-          marginTop: 2,
-        }}
-      >
-        {label}
-      </div>
+    <div
+      style={{
+        flex: 1,
+        textAlign: 'center',
+        borderRight: '1px solid #262626',
+        padding: '2px 4px',
+      }}
+    >
+      <span style={{ fontWeight: 700, fontSize: 15, color }}>{count}</span>
+      <span style={{ color: '#888', marginLeft: 4, fontSize: 10 }}>{label}</span>
     </div>
   );
 }
