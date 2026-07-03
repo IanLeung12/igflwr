@@ -278,8 +278,6 @@ function EmptyState({ onScrape }: { onScrape: () => void }) {
   );
 }
 
-const spinKeyframes = `@keyframes igflwr-spin { to { transform: rotate(360deg); } }`;
-
 function ScrapingState({ phase }: { phase: string }) {
   return (
     <div
@@ -289,18 +287,31 @@ function ScrapingState({ phase }: { phase: string }) {
         color: '#888',
       }}
     >
-      <style>{spinKeyframes}</style>
-      <div
-        style={{
-          width: 24,
-          height: 24,
-          border: '3px solid #333',
-          borderTop: '3px solid #0095f6',
-          borderRadius: '50%',
-          margin: '0 auto 12px',
-          animation: 'igflwr-spin 0.8s linear infinite',
-        }}
-      />
+      <svg
+        width="24"
+        height="24"
+        viewBox="0 0 24 24"
+        style={{ margin: '0 auto 12px', display: 'block' }}
+      >
+        <circle
+          cx="12" cy="12" r="10"
+          fill="none" stroke="#333" strokeWidth="3"
+        />
+        <path
+          d="M12 2a10 10 0 0 1 10 10"
+          fill="none" stroke="#0095f6"
+          strokeWidth="3" strokeLinecap="round"
+        >
+          <animateTransform
+            attributeName="transform"
+            type="rotate"
+            from="0 12 12"
+            to="360 12 12"
+            dur="0.8s"
+            repeatCount="indefinite"
+          />
+        </path>
+      </svg>
       <div style={{ fontSize: 13 }}>{phase}</div>
       <div style={{ fontSize: 11, color: '#666', marginTop: 6 }}>
         Scrolling through list...
