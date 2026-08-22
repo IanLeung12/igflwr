@@ -17,6 +17,37 @@ export function isValidUsername(str: string): boolean {
   return /^[a-zA-Z0-9._]+$/.test(str);
 }
 
+/**
+ * Instagram paths that look like usernames but are app routes, not people.
+ */
+const RESERVED_PATHS = new Set([
+  'explore', 'reels', 'reel', 'direct', 'accounts', 'p', 'stories', 'tv',
+  'about', 'legal', 'privacy', 'terms', 'developer', 'directory', 'challenge',
+  'emails', 'session', 'oauth', 'graphql', 'api', 'ajax', 'web', 'settings',
+  'inbox', 'archive', 'edit', 'password', 'help', 'support', 'locations',
+  'topics', 'your_activity', 'notifications',
+]);
+
+/**
+ * Extract a username from an Instagram profile href.
+ * Returns null for anything that is not a single-segment profile path.
+ * This is the only trustworthy username source: every real row in a
+ * followers/following dialog is wrapped in an <a href="/username/">.
+ */
+export function usernameFromHref(href: string): string | null {
+  if (!href) return null;
+  let path = href;
+  if (path.includes('://')) {
+    const idx = path.indexOf('/', path.indexOf('://') + 3);
+    path = idx === -1 ? '' : path.slice(idx);
+  }
+  path = path.split('?')[0].split('#')[0].replace(/^\//, '').replace(/\/$/, '');
+  if (!path || path.includes('/')) return null;
+  if (!isValidUsername(path)) return null;
+  if (RESERVED_PATHS.has(path.toLowerCase())) return null;
+  return path;
+}
+
 function getVisibleDialog(): HTMLElement | null {
   const allDialogs = document.querySelectorAll<HTMLElement>('div[role="dialog"]');
   console.debug(`[IG Flwr] getVisibleDialog: found ${allDialogs.length} div[role="dialog"] elements`);
@@ -460,12 +491,52 @@ function extractUserFromElement(el: HTMLElement): InstagramUser | null {
   return null;
 }
 
+/**
+ * Instagram shows "Suggested for you" (or similar) at the bottom of followers/following dialogs.
+ * These are not actual followers/following. Detect the boundary element so we can skip them.
+ */
+const SUGGESTION_HEADERS = [
+  'suggested for you',
+  'suggestions for you',
+  'you might like',
+  'people you might know',
+  'discover people',
+  'more suggestions',
+  'recommended for you',
+  'follow suggestions',
+  'suggested accounts',
+  'similar accounts',
+];
+
+function findSuggestedBoundary(dialog: HTMLElement): Element | null {
+  for (const textEl of dialog.querySelectorAll<HTMLElement>(
+    'span, div, h1, h2, h3, h4, h5, h6, p, strong, b, label',
+  )) {
+    const text = textEl.textContent?.toLowerCase().trim() || '';
+    if (!text || text.length > 40) continue;
+    if (SUGGESTION_HEADERS.some(h => text.includes(h))) {
+      console.debug(`[IG Flwr] findSuggestedBoundary: found "${text.slice(0, 40)}"`, {
+        tagName: textEl.tagName,
+        className: textEl.className,
+      });
+      return textEl;
+    }
+  }
+  return null;
+}
+
 function extractUsers(dialog: HTMLElement): InstagramUser[] {
   const users: InstagramUser[] = [];
   const seen = new Set<string>();
+  const suggestionBoundary = findSuggestedBoundary(dialog);
 
-  function add(user: InstagramUser | null): void {
-    if (user && !seen.has(user.username)) {
+  function isBeforeSuggestion(el: HTMLElement): boolean {
+    if (!suggestionBoundary) return true;
+    return (el.compareDocumentPosition(suggestionBoundary) & Node.DOCUMENT_POSITION_PRECEDING) !== 0;
+  }
+
+  function add(user: InstagramUser | null, el: HTMLElement): void {
+    if (user && !seen.has(user.username) && isBeforeSuggestion(el)) {
       seen.add(user.username);
       users.push(user);
     }
@@ -473,83 +544,112 @@ function extractUsers(dialog: HTMLElement): InstagramUser[] {
 
   let s1 = 0, s2 = 0, s3 = 0, s4 = 0, s5 = 0, s6 = 0, s7 = 0, s8 = 0;
 
-  // 1: standard anchor links
-  for (const el of dialog.querySelectorAll<HTMLElement>('a[href^="/"]')) {
-    add(extractUserFromElement(el)); s1++;
+  // 1: PRIMARY - anchor hrefs. Every genuine user row in the dialog is
+  // wrapped in <a href="/username/">, so this is the only source we trust.
+  // Display names, alt text and bare spans are NOT usernames; using them as
+  // primary sources produced hundreds of phantom entries.
+  for (const el of dialog.querySelectorAll<HTMLAnchorElement>('a[href^="/"]')) {
+    s1++;
+    const username = usernameFromHref(el.getAttribute('href') || '');
+    if (!username || seen.has(username)) continue;
+
+    const row =
+      el.closest<HTMLElement>('li, div[role="listitem"]') ||
+      el.parentElement?.parentElement ||
+      el;
+
+    let fullName = '';
+    for (const sp of row.querySelectorAll('span')) {
+      const t = sp.textContent?.trim() || '';
+      if (!t || t === username || t.length >= 60) continue;
+      if (t.startsWith('@') || isSuspiciousKeyword(t.toLowerCase())) continue;
+      fullName = t;
+      break;
+    }
+
+    const img = row.querySelector<HTMLImageElement>('img');
+    add({ username, fullName, avatarUrl: img?.src || '' }, el);
   }
 
-  // 2: role-based links
-  for (const el of dialog.querySelectorAll<HTMLElement>('div[role="link"]')) {
-    add(extractUserFromElement(el)); s2++;
-  }
+  // Strategies 2-8 are DOM-change fallbacks only. They match generic layout
+  // divs and will happily turn a full name into a "username", so they run
+  // only when the anchor pass found nothing at all.
+  if (users.length === 0) {
+    // 2: role-based links
+    for (const el of dialog.querySelectorAll<HTMLElement>('div[role="link"]')) {
+      add(extractUserFromElement(el), el); s2++;
+    }
 
-  // 3: Instagram 2024+ common user row class
-  for (const el of dialog.querySelectorAll<HTMLElement>('div[class*="x9f619"]')) {
-    add(extractUserFromElement(el)); s3++;
-  }
+    // 3: Instagram 2024+ common user row class
+    for (const el of dialog.querySelectorAll<HTMLElement>('div[class*="x9f619"]')) {
+      add(extractUserFromElement(el), el); s3++;
+    }
 
-  // 4: another common Instagram user row class
-  for (const el of dialog.querySelectorAll<HTMLElement>('div[class*="xt0psk2"]')) {
-    add(extractUserFromElement(el)); s4++;
-  }
+    // 4: another common Instagram user row class
+    for (const el of dialog.querySelectorAll<HTMLElement>('div[class*="xt0psk2"]')) {
+      add(extractUserFromElement(el), el); s4++;
+    }
 
-  // 5: profile-picture img alt (walk up to parent row)
-  for (const el of dialog.querySelectorAll<HTMLImageElement>(
-    'img[alt*="profile picture"]',
-  )) {
-    const parent = el.parentElement || el;
-    add(extractUserFromElement(parent)); s5++;
-  }
+    // 5: profile-picture img alt (walk up to parent row)
+    for (const el of dialog.querySelectorAll<HTMLImageElement>(
+      'img[alt*="profile picture"]',
+    )) {
+      const parent = el.parentElement || el;
+      add(extractUserFromElement(parent), parent); s5++;
+    }
 
-  // 6: test-id based selectors
-  for (const el of dialog.querySelectorAll<HTMLElement>(
-    'div[data-testid="user-avatar"], [data-testid*="user"], [data-testid*="avatar"]',
-  )) {
-    add(extractUserFromElement(el)); s6++;
-  }
+    // 6: test-id based selectors
+    for (const el of dialog.querySelectorAll<HTMLElement>(
+      'div[data-testid="user-avatar"], [data-testid*="user"], [data-testid*="avatar"]',
+    )) {
+      add(extractUserFromElement(el), el); s6++;
+    }
 
-  // 7: span+span pattern where first is username, second is full name
-  for (const el of dialog.querySelectorAll<HTMLElement>(
-    'div, a, span[role="link"], li',
-  )) {
-    const childSpans = el.querySelectorAll(':scope > span');
-    if (childSpans.length < 2) continue;
-    const first = childSpans[0]?.textContent?.trim() || '';
-    const second = childSpans[1]?.textContent?.trim() || '';
-    if (
-      first &&
-      second &&
-      isValidUsername(first) &&
-      first.length <= 30 &&
-      !first.includes(' ') &&
-      !first.startsWith('@') &&
-      second.length < 60 &&
-      second !== first &&
-      !seen.has(first)
-    ) {
-      const img = el.querySelector<HTMLImageElement>('img');
-      seen.add(first);
-      users.push({
-        username: first,
-        fullName: second,
-        avatarUrl: img?.src || '',
-      }); s7++;
+    // 7: span+span pattern where first is username, second is full name
+    for (const el of dialog.querySelectorAll<HTMLElement>(
+      'div, a, span[role="link"], li',
+    )) {
+      if (!isBeforeSuggestion(el)) continue;
+      const childSpans = el.querySelectorAll(':scope > span');
+      if (childSpans.length < 2) continue;
+      const first = childSpans[0]?.textContent?.trim() || '';
+      const second = childSpans[1]?.textContent?.trim() || '';
+      if (
+        first &&
+        second &&
+        isValidUsername(first) &&
+        first.length <= 30 &&
+        !first.includes(' ') &&
+        !first.startsWith('@') &&
+        second.length < 60 &&
+        second !== first &&
+        !seen.has(first)
+      ) {
+        const img = el.querySelector<HTMLImageElement>('img');
+        seen.add(first);
+        users.push({
+          username: first,
+          fullName: second,
+          avatarUrl: img?.src || '',
+        }); s7++;
+      }
+    }
+
+    // 8: virtual scroller patterns
+    for (const el of dialog.querySelectorAll<HTMLElement>(
+      'div[role="presentation"] > div, ' +
+        'div[style*="transform"], ' +
+        'div[class*="x1cy8zhl"], ' +
+        'div[class*="x78zum5"], ' +
+        'div[class*="x1q0q8m5"]',
+    )) {
+      add(extractUserFromElement(el), el); s8++;
     }
   }
 
-  // 8: virtual scroller patterns
-  for (const el of dialog.querySelectorAll<HTMLElement>(
-    'div[role="presentation"] > div, ' +
-      'div[style*="transform"], ' +
-      'div[class*="x1cy8zhl"], ' +
-      'div[class*="x78zum5"], ' +
-      'div[class*="x1q0q8m5"]',
-  )) {
-    add(extractUserFromElement(el)); s8++;
-  }
-
-  // Last resort: text scan
-  if (users.length < 10) {
+  // Last resort: text scan. Loosest strategy of all - it guesses usernames
+  // from raw text - so it only runs when every selector strategy came up empty.
+  if (users.length === 0 && !suggestionBoundary) {
     const scanned = extractUsersByTextScan(dialog, seen);
     for (const u of scanned) {
       if (!seen.has(u.username)) {
@@ -559,7 +659,7 @@ function extractUsers(dialog: HTMLElement): InstagramUser[] {
     }
   }
 
-  console.debug(`[IG Flwr] extractUsers: ${users.length} total | s1=${s1} s2=${s2} s3=${s3} s4=${s4} s5=${s5} s6=${s6} s7=${s7} s8=${s8}`);
+  console.debug(`[IG Flwr] extractUsers: ${users.length} total | s1=${s1} s2=${s2} s3=${s3} s4=${s4} s5=${s5} s6=${s6} s7=${s7} s8=${s8}${suggestionBoundary ? ' (suggested filtered)' : ''}`);
 
   return users;
 }
@@ -803,6 +903,39 @@ async function scrapeDialog(
 
   console.debug(`[IG Flwr] Main loop ended: reason=${exitReason}, users=${accumulated.length}`);
 
+  // Post-loop suggestion filter: re-check DOM for suggestion boundary.
+  // Covers the edge case where suggested users were loaded in the same iteration
+  // the boundary appeared but before it was rendered.
+  const mainBoundary = getVisibleDialog() ? findSuggestedBoundary(dialog) : null;
+  if (mainBoundary) {
+    const before = accumulated.length;
+    const cleanUsers: InstagramUser[] = [];
+    const cleanSeen = new Set<string>();
+    // Re-extract from current dialog to get only pre-boundary users
+    const currentClean = extractUsers(dialog);
+    const currentNames = new Set(currentClean.map(u => u.username.toLowerCase()));
+    // Keep accumulated users whose usernames are still in the clean set,
+    // plus any that weren't rendered this iteration (scrolled out of view)
+    // but that we know aren't suspicious based on keyword check
+    for (const u of accumulated) {
+      const key = u.username.toLowerCase();
+      if (currentNames.has(key) || !isSuspiciousKeyword(key)) {
+        if (!cleanSeen.has(key)) {
+          cleanSeen.add(key);
+          cleanUsers.push(u);
+        }
+      }
+    }
+    const removed = before - cleanUsers.length;
+    if (removed > 0) {
+      console.warn(`[IG Flwr] Post-loop suggestion filter removed ${removed} users (was ${before}, now ${cleanUsers.length})`);
+      accumulated.length = 0;
+      accumulated.push(...cleanUsers);
+      allSeen.clear();
+      for (const u of cleanUsers) allSeen.add(u.username.toLowerCase());
+    }
+  }
+
   // Verification pass: up to 30s of additional waiting with periodic checks.
   // Instagram may be loading the final batch via a slow API call.
   for (let attempt = 0; attempt < 6; attempt++) {
@@ -887,18 +1020,28 @@ const SUSPICIOUS_KEYWORDS = new Set([
   'terms', 'cookies', 'feedback', 'suggested',
 ]);
 
+export function isSuspiciousKeyword(lower: string): boolean {
+  return SUSPICIOUS_KEYWORDS.has(lower);
+}
+
 export function findSuspiciousUsers(
   users: InstagramUser[],
   expectedCount?: number,
-): { suspicious: InstagramUser[]; summary: string } {
+  filterResults?: boolean,
+): { suspicious: InstagramUser[]; clean: InstagramUser[]; summary: string } {
   const suspicious: InstagramUser[] = [];
+  const clean: InstagramUser[] = [];
   for (const u of users) {
     const lower = u.username.toLowerCase();
     if (
       SUSPICIOUS_KEYWORDS.has(lower) ||
-      u.fullName && SUSPICIOUS_KEYWORDS.has(u.fullName.toLowerCase())
+      u.fullName && SUSPICIOUS_KEYWORDS.has(u.fullName.toLowerCase()) ||
+      lower.includes('..') ||
+      /[@+*#%=]/.test(lower)
     ) {
       suspicious.push(u);
+    } else {
+      clean.push(u);
     }
   }
 
@@ -910,8 +1053,10 @@ export function findSuspiciousUsers(
   }
   if (suspicious.length > 0) {
     parts.push(`${suspicious.length} suspicious: ${suspicious.map(u => u.username).join(', ')}`);
+  } else if (expectedCount !== undefined && users.length !== expectedCount) {
+    parts.push(`no suspicious usernames — likely Instagram "Suggested" section was mixed in`);
   }
-  return { suspicious, summary: parts.join(' | ') };
+  return { suspicious, clean: filterResults ? clean : users, summary: parts.join(' | ') };
 }
 
 export function getProfileCounts(): { followers: number; following: number } {

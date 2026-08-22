@@ -98,44 +98,50 @@ export function Sidebar({ onClose }: SidebarProps) {
 
       setScrapePhase('Scraping followers...');
       log('Opening followers dialog...');
-      const f = await scrapeFollowers();
-      setFollowers(f);
-      setScrapePhase(`Found ${f.length} followers. Scraping following...`);
-      log(`Found ${f.length} followers`);
+      const rawFollowers = await scrapeFollowers();
+      setScrapePhase(`Found ${rawFollowers.length} followers. Checking...`);
+      log(`Found ${rawFollowers.length} followers`);
 
-      const fSuspicion = findSuspiciousUsers(f, expected.followers);
+      const fSuspicion = findSuspiciousUsers(rawFollowers, expected.followers, true);
+      const followers = fSuspicion.clean;
+      setFollowers(followers);
+      const followersFiltered = rawFollowers.length - followers.length;
+      if (followersFiltered > 0) log(`Filtered ${followersFiltered} suspicious followers`);
       if (fSuspicion.summary) {
         setSuspicionReports(prev => [...prev, `Followers: ${fSuspicion.summary}`]);
         log(`Followers check: ${fSuspicion.summary}`);
       }
 
       log('Opening following dialog...');
-      const g = await scrapeFollowing();
-      setFollowing(g);
-      log(`Found ${g.length} following`);
+      const rawFollowing = await scrapeFollowing();
+      log(`Found ${rawFollowing.length} following`);
 
-      const gSuspicion = findSuspiciousUsers(g, expected.following);
+      const gSuspicion = findSuspiciousUsers(rawFollowing, expected.following, true);
+      const following = gSuspicion.clean;
+      setFollowing(following);
+      const followingFiltered = rawFollowing.length - following.length;
+      if (followingFiltered > 0) log(`Filtered ${followingFiltered} suspicious following`);
       if (gSuspicion.summary) {
         setSuspicionReports(prev => [...prev, `Following: ${gSuspicion.summary}`]);
         log(`Following check: ${gSuspicion.summary}`);
       }
 
-      const analyzed = analyzeFollowBack(f, g);
+      const analyzed = analyzeFollowBack(followers, following);
       setUsers(analyzed);
       log(`Analysis complete: ${analyzed.length} total users`);
 
       const mutuals = analyzed.filter((u) => u.status === 'mutual').length;
-      setScrapeSummary(`${f.length} followers, ${g.length} following, ${mutuals} mutuals found`);
+      setScrapeSummary(`${followers.length} followers, ${following.length} following, ${mutuals} mutuals found`);
 
-      const warning = checkDataCompleteness(f, g);
+      const warning = checkDataCompleteness(followers, following);
       if (warning) {
         setCompletenessWarning(warning);
         log(`Data warning: ${warning}`);
       }
 
       const { saveFollowers, saveFollowing } = await import('../utils/storage');
-      await saveFollowers(f);
-      await saveFollowing(g);
+      await saveFollowers(followers);
+      await saveFollowing(following);
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       setError(msg);
