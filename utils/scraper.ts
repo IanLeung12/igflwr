@@ -525,10 +525,37 @@ function findSuggestedBoundary(dialog: HTMLElement): Element | null {
   return null;
 }
 
+/**
+ * The dialog is more than the list: it also holds a title bar, a search box
+ * and (at the bottom) any "Suggested" section. Only the scrollable list
+ * container holds actual followers/following rows, so extraction is scoped
+ * to it. Falls back to the whole dialog if no scrollable child is found.
+ */
+function getListRoot(dialog: HTMLElement): HTMLElement {
+  let best: HTMLElement | null = null;
+  let bestDelta = 0;
+  for (const child of dialog.querySelectorAll<HTMLElement>('*')) {
+    if (!canScroll(child)) continue;
+    const delta = child.scrollHeight - child.clientHeight;
+    if (delta > bestDelta) { bestDelta = delta; best = child; }
+  }
+  return best || dialog;
+}
+
+/**
+ * Username of the profile being scraped. Captured before the dialog opens
+ * (the URL changes once it does) and excluded from results: you can never
+ * be your own follower, but your own avatar/link can appear in the chrome
+ * around the list.
+ */
+let profileOwner: string | null = null;
+
 function extractUsers(dialog: HTMLElement): InstagramUser[] {
   const users: InstagramUser[] = [];
   const seen = new Set<string>();
   const suggestionBoundary = findSuggestedBoundary(dialog);
+  const listRoot = getListRoot(dialog);
+  const owner = profileOwner?.toLowerCase() || null;
 
   function isBeforeSuggestion(el: HTMLElement): boolean {
     if (!suggestionBoundary) return true;
@@ -548,10 +575,22 @@ function extractUsers(dialog: HTMLElement): InstagramUser[] {
   // wrapped in <a href="/username/">, so this is the only source we trust.
   // Display names, alt text and bare spans are NOT usernames; using them as
   // primary sources produced hundreds of phantom entries.
-  for (const el of dialog.querySelectorAll<HTMLAnchorElement>('a[href^="/"]')) {
+  for (const el of listRoot.querySelectorAll<HTMLAnchorElement>('a[href^="/"]')) {
     s1++;
-    const username = usernameFromHref(el.getAttribute('href') || '');
-    if (!username || seen.has(username)) continue;
+    const href = el.getAttribute('href') || '';
+    const username = usernameFromHref(href);
+    if (!username) {
+      // Surface the one way this filter can be wrong: a real account whose
+      // name collides with a reserved path. Silent here would look like an
+      // off-by-one in the final count.
+      const raw = href.split('?')[0].replace(/^\//, '').replace(/\/$/, '');
+      if (raw && !raw.includes('/') && isValidUsername(raw) && RESERVED_PATHS.has(raw.toLowerCase())) {
+        console.debug(`[IG Flwr] extractUsers: skipped reserved-path link inside the list: /${raw}/`);
+      }
+      continue;
+    }
+    if (seen.has(username)) continue;
+    if (owner && username.toLowerCase() === owner) continue;
 
     const row =
       el.closest<HTMLElement>('li, div[role="listitem"]') ||
@@ -656,6 +695,18 @@ function extractUsers(dialog: HTMLElement): InstagramUser[] {
         seen.add(u.username);
         users.push(u);
       }
+    }
+  }
+
+  if (listRoot !== dialog) {
+    const strays = new Set<string>();
+    for (const el of dialog.querySelectorAll<HTMLAnchorElement>('a[href^="/"]')) {
+      if (listRoot.contains(el)) continue;
+      const u = usernameFromHref(el.getAttribute('href') || '');
+      if (u) strays.add(u);
+    }
+    if (strays.size > 0) {
+      console.debug(`[IG Flwr] extractUsers: ${strays.size} profile link(s) OUTSIDE the list container (excluded): ${[...strays].join(', ')}`);
     }
   }
 
@@ -814,6 +865,11 @@ async function scrapeDialog(
 ): Promise<InstagramUser[]> {
   const startTime = Date.now();
   console.log(`[IG Flwr] Scrape started at ${new Date().toISOString()}, kind: ${kind}`);
+
+  // Capture before clicking: opening the dialog rewrites the URL to
+  // /<owner>/followers/, which breaks the path-based username fallback.
+  profileOwner = getCurrentUsername();
+  console.debug(`[IG Flwr] Profile owner: ${profileOwner ?? '(unknown)'}`);
 
   // Prefer GraphQL API — faster and gets ALL users without scrolling
   const apiUser = getCurrentUsername();
@@ -1054,7 +1110,14 @@ export function findSuspiciousUsers(
   if (suspicious.length > 0) {
     parts.push(`${suspicious.length} suspicious: ${suspicious.map(u => u.username).join(', ')}`);
   } else if (expectedCount !== undefined && users.length !== expectedCount) {
-    parts.push(`no suspicious usernames — likely Instagram "Suggested" section was mixed in`);
+    const diff = users.length - expectedCount;
+    if (diff > 5) {
+      parts.push(`no suspicious usernames — likely Instagram "Suggested" section was mixed in`);
+    } else if (diff < 0) {
+      parts.push(`Instagram's own count includes deactivated/deleted accounts that never render as rows`);
+    } else {
+      parts.push(`within normal drift of Instagram's own count`);
+    }
   }
   return { suspicious, clean: filterResults ? clean : users, summary: parts.join(' | ') };
 }
